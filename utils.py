@@ -6,15 +6,16 @@ from collections import Counter
 from nltk.corpus import stopwords
 import numpy as np
 import tensorflow as tf
-from config import cfg
+from Configure import configure
 
 
 class Vocab(object):
     ''''''
-    def __init__(self, trainfl, stopwds=False, minoccur=2):
+    def __init__(self, trainfl, config, stopwds=False, minoccur=2):
         '''
         :param trainfl:
         '''
+        self.config = config
         self.infil = trainfl
         self.minoccur = minoccur
         self.counter = Counter()
@@ -45,9 +46,9 @@ class Vocab(object):
 
     def save_voc(self):
         ''''''
-        if not os.path.exists(cfg.savedir):
-            os.mkdir(cfg.savedir)
-        with open(os.path.join(cfg.savedir, 'vocab.fil'), 'w') as vocout:
+        if not os.path.exists(self.config.savedir):
+            os.mkdir(self.config.savedir)
+        with open(os.path.join(self.config.savedir, 'vocab.fil'), 'w') as vocout:
             for idx, word in enumerate(self.id2str):
                 vocout.write(word+'\t'+str(idx)+'\n')
         return
@@ -77,50 +78,54 @@ class Vocab(object):
 
     def get_initializer(self):
         ''''''
-        if cfg.initializer == 'orth':
-            return tf.orthogonal_initializer(gain=cfg.mfactor, seed=cfg.seed)
-        elif cfg.initializer == 'randomn':
-            return tf.random_normal_initializer(mean=cfg.mean, stddev=cfg.stddev, seed=cfg.seed)
-        elif cfg.initializer == 'randomu':
-            return tf.random_uniform_initializer(minval=cfg.min, maxval=cfg.max, seed=cfg.seed)
-        elif cfg.initializer == 'varian':
-            return tf.variance_scaling_initializer(scale=cfg.scale, seed=cfg.seed)
+        if self.config.initializer == 'orth':
+            return tf.orthogonal_initializer(gain=self.config.mfactor, seed=self.config.seed)
+        elif self.config.initializer == 'randomn':
+            return tf.random_normal_initializer(mean=self.config.mean, stddev=self.config.stddev, seed=self.config.seed)
+        elif self.config.initializer == 'randomu':
+            return tf.random_uniform_initializer(minval=self.config.min, maxval=self.config.max, seed=self.config.seed)
+        elif self.config.initializer == 'varian':
+            return tf.variance_scaling_initializer(scale=self.config.scale, seed=self.config.seed)
 
     def emb_init(self):
         ''''''
+        #embinit = self.initializer([len(self.id2str), self.config.vecdim], dtype=tf.float32)
+        #wtinit = self.initializer([len(self.id2str), self.config.vecdim], dtype=tf.float32)
+        with tf.variable_scope('embinit', reuse=tf.AUTO_REUSE):
+            embvec = tf.get_variable('embvec', shape=[len(self.id2str), self.config.vec_dim], dtype=tf.float32, initializer=tf.random_normal_initializer)
+            wtvec = tf.get_variable('wtvec', shape=[len(self.id2str), self.config.vec_dim], dtype=tf.float32, initializer=tf.orthogonal_initializer)
+            enorm = tf.sqrt(tf.reduce_sum(tf.square(embvec), 1, keep_dims=True))
+            wnorm = tf.sqrt(tf.reduce_sum(tf.square(embvec), 1, keep_dims=True))
+        return embvec/enorm, wtvec/wnorm
 
-        embinit = self.initializer([len(self.id2str), cfg.vecdim], dtype=tf.float32)
-        wtinit = self.initializer([len(self.id2str), cfg.vecdim], dtype=tf.float32)
-        embvec = tf.get_variable('embvec', initializer=embinit)
-        wtvec = tf.get_variable('wtvec', initializer=wtinit)
-
-        return embvec, wtvec
-
-    def _looking_up(self, inputs, type='E'):
+    def _looking_up(self, inputs, type='EMB'):
         ''''''
-        if type == 'W':
+        if type == 'WGT':
             embs = tf.nn.embedding_lookup(self.wtvec, inputs)
         else:
             embs = tf.nn.embedding_lookup(self.embvec, inputs)
 
         return embs
 
-    def _embsave(self):
-        raise NotImplemented
+    def _embsave(self, sess):
+        ''''''
+        embedding_dir = os.path.join(self.config.savedir, 'embeddings/')
+        emsaver = tf.train.Saver({'embed_vec': self.embvec, 'weight_vec': self.wtvec}, max_to_keep=5, filename='trained_embeddings')
+        emsaver.save(sess, save_path=embedding_dir)
 
 class Dataset(object):
     ''''''
-    def __init__(self, datafile, vocab):
-        self.params = cfg
+    def __init__(self, datafile, vocab, config):
+        self.config = config
         self.trainfile = datafile
         self.vocab = vocab
         self.vsize = vocab.size
         self.dataset = self.load_file()
         self.windata = self.expand_set()
         del self.dataset
-        self.inputs = tf.placeholder(dtype=tf.int32, shape=[cfg.batch_size, 2*cfg.windows], name='inputs')
-        self.trueTa = tf.placeholder(dtype=tf.int32, shape=[cfg.batch_size, ], name='Truetar')
-        self.sampleTa = tf.placeholder(dtype=tf.int32, shape=[cfg.batch_size, cfg.sample], name='sampleTar')
+        self.inputs = 'inputs'
+        self.trueTa = 'truelabel'
+        self.sampleTa = 'samplelabel'
 
     def load_file_up(self):
         # data should one sentence per line
@@ -131,7 +136,7 @@ class Dataset(object):
             while line:
                 datalines.append(self.vocab.word2id(line.split()))
 
-                if len(datalines) == cfg.batch_size:
+                if len(datalines) == self.config.batch_size:
                     yield datalines
                     datalines = []
 
@@ -159,7 +164,7 @@ class Dataset(object):
 
         for prebatch in self.dataset:
             for sent in prebatch:
-                if len(sent) > 2*cfg.windows+1:
+                if len(sent) > 2*self.config.window_size+1:
                     wdata.extend(self.sent2wset(sent))
                     if len(wdata) > 500:
                         yield wdata
@@ -171,7 +176,7 @@ class Dataset(object):
         wdata = []
 
         for sent in self.dataset:
-            if len(sent) > 2*cfg.windows+1:
+            if len(sent) > 2*self.config.window_size+1:
                 wdata.extend(self.sent2wset(sent))
 
         return wdata
@@ -179,33 +184,31 @@ class Dataset(object):
 
     def sent2wset(self, sentence):
         ''''''
-        # arrary items with length: (2*cfg.windows + 1 + cfg.samples)
+        # arrary items with length: (2*self.config.windows + 1 + self.config.sample_num)
         wset = []
         for id, word in enumerate(sentence):
-            if id+2*cfg.windows < len(sentence):
-                wset.append(sentence[id:(id+2*cfg.windows+1)]+self.random_sample(sentence[id+cfg.windows]))
+            if id+2*self.config.window_size < len(sentence):
+                wset.append(sentence[id:(id+2*self.config.window_size+1)]+self.random_sample(sentence[id+self.config.window_size]))
         return wset
 
     def random_sample(self, intnum):
         ''''''
 
-        samples = random.sample(range(self.vsize), k=cfg.sample+1)
+        samples = random.sample(range(self.vsize), k=self.config.sample_num+1)
 
         if intnum not in samples:
             samples.pop()
         else:
             samples.pop(samples.index(intnum))
-
         return samples
-
 
     def batchs(self, keeplast=False):
         ''''''
-        # every item [2*cfg.windows + 1 + cfg.sample]
+        # every item [2*self.config.windows + 1 + self.config.sample]
         minibatch = []
         for num, itm in enumerate(self.windata):
             minibatch.append(itm)
-            if len(minibatch) == cfg.batch_size:
+            if len(minibatch) == self.config.batch_size:
                 yield np.array(minibatch)
                 minibatch = []
             if num == len(self.windata)-1 and keeplast:
@@ -215,38 +218,57 @@ class Dataset(object):
         ''''''
         for batch in self.batchs():
             fedict = {}
-            inputs = batch[:, range(cfg.windows)+range(cfg.windows+1, 2*cfg.windows+1)]
-            trueL = batch[:, cfg.windows]
-            samples = batch[:, range(2*cfg.windows+1, len(batch[-1]))]
+            inputs = batch[:, range(self.config.window_size)+range(self.config.window_size+1, 2*self.config.window_size+1)]
+            trueL = batch[:, self.config.window_size]
+            samples = batch[:, range(2*self.config.window_size+1, len(batch[-1]))]
             fedict.update({
                 self.inputs: inputs,
                 self.trueTa: trueL,
                 self.sampleTa: samples
             })
-            yield fedict, batch[:, range(2*cfg.windows+1)]
+            yield fedict, batch[:, range(2*self.config.window_size+1)]
 
+
+def plot_figure(vocabs, embeddings, fig_name='tsne.png'):
+    ''''''
+    def plot_with_labels(low_dim_embs, labels, filename):
+        assert low_dim_embs.shape[0] >= len(labels), 'More labels than embeddings'
+        plt.figure(figsize=(18, 18))  # in inches
+        for i, label in enumerate(labels):
+            x, y = low_dim_embs[i, :]
+            plt.scatter(x, y)
+            plt.annotate(label,
+                 xy=(x, y),
+                 xytext=(5, 2),
+                 textcoords='offset points',
+                 ha='right',
+                 va='bottom')
+        plt.savefig(filename)
+        plt.close()
+    try:
+        # pylint: disable=g-import-not-at-top
+        from sklearn.manifold import TSNE
+        import matplotlib
+        matplotlib.use('Agg')
+        import matplotlib.pyplot as plt
+        from tempfile import gettempdir
+
+        tsne = TSNE(perplexity=30, n_components=2, init='pca', n_iter=5000, method='exact')
+        plot_only = 500
+        low_dim_embs = tsne.fit_transform(embeddings[:plot_only, :])
+        labels = [vocabs[i] for i in xrange(plot_only)]
+        plot_with_labels(low_dim_embs, labels, os.path.join(gettempdir(), fig_name))
+    except ImportError as ex:
+        print('Please install sklearn, matplotlib, and scipy to show embeddings.')
+        print(ex)
 
 
 if __name__ == '__main__':
-    voc = Vocab('./data/train.txt')
-    dt = Dataset('./data/train.txt', voc)
-
-    for itm in dt.batchs():
-        print itm
-        break
+    config = configure()
+    voc = Vocab('./data/train.txt', config)
+    dt = Dataset('./data/train.txt', voc, config=config)
     for itm in dt.minibatchs():
         print itm
         break
     sys.exit(0)
-
-
-
-
-    # with tf.Session() as sess:
-    #     sess.run(tf.global_variables_initializer())
-    #     print sess.run(voc.looking_up(dt.load_file()[0][0]))
-    #     print sess.run(voc.looking_up(dt.load_file()[0][1]))
-    #     print sess.run(voc.looking_up(dt.load_file()[0][3]))
-
-
 
